@@ -6,7 +6,7 @@ const { gateway, discord, ui } = phoenix;
 const RED = 0xffed4245;
 const ICON = "res://design_components_icon_native_redesign_generated_images_clockwarningicon";
 const REFRESH = 60_000;
-const DEBUG = true;
+const DEBUG = false;
 const log = (...args: unknown[]) => {
   if (DEBUG) phoenix.log.info("[timeout]", ...args);
 };
@@ -55,7 +55,11 @@ const rememberMessage = (message: Message) => {
   if (!message.id || !message.author?.id) return;
   const guild = message.guild_id ?? message.guildId;
   authors.set(message.id, { user: message.author.id, guild });
-  if (message.member) rememberMember(message.member, guild);
+  if (message.member) {
+    const m = message.member as any;
+    const uid = m.user?.id ?? m.user_id ?? message.author.id;
+    if (uid) rememberMember({ ...m, user: { id: uid } }, guild);
+  }
 };
 
 phoenix.hook(gateway.messageCreate, { after: rememberMessage });
@@ -84,8 +88,10 @@ discord.onResponse({ pathIncludes: "/messages" }, (res) => {
     const body = res.json<Message | Message[] | null>();
     const list = Array.isArray(body) ? body : body ? [body] : [];
     for (const msg of list) {
-      if (msg.member && msg.author?.id) {
-        rememberMember(msg.member, msg.guild_id ?? msg.guildId);
+      if (msg.member) {
+        const m = msg.member as any;
+        const uid = m.user?.id ?? m.user_id ?? msg.author?.id;
+        if (uid) rememberMember({ ...m, user: { id: uid } }, msg.guild_id ?? msg.guildId);
       }
     }
   } catch {
@@ -247,6 +253,7 @@ const resolveAndPlace = async (messageId: string, node: Phoenix.NodeInfo) => {
   const remaining = end - Date.now();
   const live = ui.node(node.id);
   if (!live) return;
+  if (live.accessibilityId !== `message.author:${messageId}`) return;
   if (remaining <= 0) {
     clearMarks(messageId);
     return;
