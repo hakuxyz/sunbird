@@ -11,22 +11,22 @@ const log = (...args: unknown[]) => {
   if (DEBUG) phoenix.log.info("[timeout]", ...args);
 };
 
-type Member = {
+type MemberLike = {
   user?: { id?: string };
   user_id?: string;
   communication_disabled_until?: string | null;
   communicationDisabledUntil?: string | null;
 };
 
+type Author = { user: string; guild?: string };
+
 type Message = {
   id?: string;
   author?: { id?: string };
   guild_id?: string;
   guildId?: string;
-  member?: Member;
+  member?: MemberLike;
 };
-
-type Author = { user: string; guild?: string };
 
 const pad = (id: string) => id.padStart(20, "0");
 const at = (guild: string | undefined, user: string) => `${guild ?? ""}:${user}`;
@@ -38,11 +38,9 @@ const endOf = (value: string | null | undefined) => {
 const authors = new Map<string, Author>();
 const ends = new Map<string, number>();
 const fetchedAt = new Map<string, number>();
-// one mount per row (by parent) so recycled rows don't keep old badges
-const byParent = new Map<number, Array<() => void>>();
-const byMessage = new Map<string, number>();
+const byMessage = new Map<string, { parent: number; removers: (() => void)[] }>();
 
-const rememberMember = (member: Member, guild?: string) => {
+const rememberMember = (member: MemberLike, guild?: string) => {
   const user = member.user?.id ?? member.user_id;
   if (!user) return;
   const end = endOf(member.communication_disabled_until ?? member.communicationDisabledUntil);
@@ -56,7 +54,7 @@ const rememberMessage = (message: Message) => {
   const guild = message.guild_id ?? message.guildId;
   authors.set(message.id, { user: message.author.id, guild });
   if (message.member) {
-    const m = message.member as any;
+    const m = message.member;
     const uid = m.user?.id ?? m.user_id ?? message.author.id;
     if (uid) rememberMember({ ...m, user: { id: uid } }, guild);
   }
@@ -89,7 +87,7 @@ discord.onResponse({ pathIncludes: "/messages" }, (res) => {
     const list = Array.isArray(body) ? body : body ? [body] : [];
     for (const msg of list) {
       if (msg.member) {
-        const m = msg.member as any;
+        const m = msg.member;
         const uid = m.user?.id ?? m.user_id ?? msg.author?.id;
         if (uid) rememberMember({ ...m, user: { id: uid } }, msg.guild_id ?? msg.guildId);
       }
@@ -171,23 +169,13 @@ const format = (ms: number) => {
   return `${seconds}s`;
 };
 
-const clearParent = (parent: number) => {
-  const removers = byParent.get(parent);
-  log("clearParent", parent, "removers", removers?.length ?? 0);
-  for (const remove of removers ?? []) {
-    try { remove(); } catch {}
-  }
-  byParent.delete(parent);
-  for (const [msg, atParent] of byMessage) {
-    if (atParent === parent) byMessage.delete(msg);
-  }
-};
-
 const clearMarks = (id: string) => {
-  const parent = byMessage.get(id);
-  if (parent != null) {
-    log("clearMarks", id, "parent", parent);
-    clearParent(parent);
+  const entry = byMessage.get(id);
+  if (entry) {
+    log("clearMarks", id, "parent", entry.parent);
+    for (const remove of entry.removers) {
+      try { remove(); } catch {}
+    }
   }
   byMessage.delete(id);
 };
@@ -195,16 +183,18 @@ const clearMarks = (id: string) => {
 const place = (id: string, node: Phoenix.NodeInfo, remaining: number) => {
   const parent = node.parent;
   if (parent == null) return;
-  // reused row
+  // clear previous mounts for this message
   const prev = byMessage.get(id);
-  if (prev != null && prev !== parent) clearParent(prev);
-  clearParent(parent);
+  if (prev) {
+    for (const remove of prev.removers) {
+      try { remove(); } catch {}
+    }
+  }
   log("mount", id, "node", node.id, "parent", parent);
-  byMessage.set(id, parent);
   const gap8 = (ui.node(parent)?.children ?? []).some((child) =>
     ui.node(child)?.accessibilityId?.startsWith("message.timestamp:"),
   );
-  byParent.set(parent, [
+  const removers = [
     ui.patchProps({ exact: `message.author:${id}` }, { color: RED, margin: [0, 0, 0, 0] }),
     ui.mount(
       parent,
@@ -226,7 +216,8 @@ const place = (id: string, node: Phoenix.NodeInfo, remaining: number) => {
       },
       { before: node.id },
     ),
-  ]);
+  ];
+  byMessage.set(id, { parent, removers });
 };
 
 // The author node may not exist yet; onNode fires when it does
@@ -262,8 +253,7 @@ const resolveAndPlace = async (messageId: string, node: Phoenix.NodeInfo) => {
 };
 
 phoenix.onUnload(() => {
-  for (const parent of [...byParent.keys()]) clearParent(parent);
-  byMessage.clear();
+  for (const [id] of byMessage) clearMarks(id);
   authors.clear();
   ends.clear();
   fetchedAt.clear();
